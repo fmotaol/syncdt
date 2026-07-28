@@ -67,22 +67,22 @@ BEGIN
 	end if;
 
 	if TG_OP = 'DELETE' or TG_OP = 'UPDATE' then
-		expold = syncdt.solve_expression(rec.source_exp, OLD);
+		expold = syncdt._solve_expression(rec.source_exp, OLD);
 	end if;
 
 	if TG_OP = 'INSERT' or TG_OP = 'UPDATE' then
-		expnew = syncdt.solve_expression(rec.source_exp, NEW);
+		expnew = syncdt._solve_expression(rec.source_exp, NEW);
 	end if;
 
 	if rec.wait_until is not null then
 	    --insert into syncdt._temp_log(message) values (format('wait_until: %s | Record: %s', rec.wait_until, rec));
 
 		if expold is not null then
-			expw_old = syncdt.solve_expression(rec.wait_until, OLD);
+			expw_old = syncdt._solve_expression(rec.wait_until, OLD);
 		end if;
 
 		if expnew is not null then
-			expw_new = syncdt.solve_expression(rec.wait_until, NEW);
+			expw_new = syncdt._solve_expression(rec.wait_until, NEW);
 		end if;
 	end if;
 
@@ -130,7 +130,7 @@ BEGIN
 		raise exception 'Não foi identificada dependência entre as tabelas % e %', notify_source_changed.derived_table, notify_source_changed.source_table;
 	end if;
 
-	exp = syncdt.solve_expression(rec.source_exp, source_record);
+	exp = syncdt._solve_expression(rec.source_exp, source_record);
 
     PERFORM syncdt._notify_source_changed(rec.derived_schema, rec.derived_table, rec.refresh_mode, rec.notification_mode, rec.target_columns, 
     	rec.source_schema, rec.source_table, exp, null);
@@ -149,8 +149,8 @@ DECLARE
     sfilter TEXT;
     c FLOAT;
 BEGIN
-    -- Constrói o filter usando o column_mapping
-    sfilter := syncdt._build_filter(target_columns, source_exp);
+    --sfilter := syncdt._build_filter(target_columns, source_exp);
+    sfilter := replace(source_exp, '$target_columns', target_columns);
     
     -- Enfileira o refresh
 	if notification_mode = 'optimized' then
