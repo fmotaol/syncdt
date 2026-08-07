@@ -127,7 +127,7 @@ BEGIN
     GET DIAGNOSTICS job_count = ROW_COUNT;
     
     IF job_count = 0 THEN
-        RAISE NOTICE 'Nenhuma atualização disponível para processar';
+        --RAISE NOTICE 'Nenhuma atualização disponível para processar';
         RETURN;
     END IF;
 
@@ -205,23 +205,6 @@ BEGIN
         END;
     END LOOP;
 
-    -- 📊 PASSO 4: Relatório final
-    --RAISE NOTICE '✅ Worker %: Processamento concluído!', pid;
-    --RAISE NOTICE '   Total de jobs pegos: %', job_count;
-    --RAISE NOTICE '   ✅ Sucesso: %', total_inserted;
-    --RAISE NOTICE '   ❌ Erros: %', error_count;
-    --RAISE NOTICE '   ⏱️  Tempo total: % segundos', EXTRACT(EPOCH FROM (NOW() - start_time));
-    
-    -- Mostra status dos jobs processados
-    FOR rec IN 
-        SELECT status, COUNT(*) as total
-        FROM temp_jobs_to_process 
-        GROUP BY status
-        ORDER BY status
-    LOOP
-        RAISE NOTICE '   📊 %: %', rec.status, rec.total;
-    END LOOP;
-    
     -- Log de sucesso (mantido do código original, mas comentado)
     --INSERT INTO syncdt._logs (table_schema, table_name, command, started_at, completed_at, rows_affected, success)
     --VALUES (derived_schema, derived_table, 'REFRESH', start_time, NOW(), total_inserted, true);
@@ -368,4 +351,6 @@ BEGIN
 	perform syncdt.update_changes(null, max_queue);
 END;
 $$;
+
+
 
