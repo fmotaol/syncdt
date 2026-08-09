@@ -158,6 +158,6 @@ if errorlevel 1 (
 )
 
 echo ==========================================
-echo Processo concluido!
+echo Commit/push concluido!
 pause
 goto :eof
