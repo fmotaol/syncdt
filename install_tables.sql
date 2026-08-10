@@ -50,8 +50,16 @@ BEGIN
         processed_at TIMESTAMPTZ,
 		wait_until TIMESTAMPTZ,
 		source_schema text,
-		source_table text
+		source_table text,
+		last_try timestamptz,
+		last_error text
     );
+    
+    
+--ALTER TABLE syncdt._refresh_queue ADD last_try timestamptz;
+
+--ALTER TABLE syncdt._refresh_queue ADD last_error text;
+    
 
 	CREATE INDEX IF NOT EXISTS idx_refresh_queue_pending ON syncdt._refresh_queue(triggered_at, id) 
 		WHERE processed_at IS NULL;

@@ -192,6 +192,11 @@ BEGIN
                     error_message = SQLERRM
                 WHERE id = rec.id;
 
+
+	            UPDATE syncdt._refresh_queue 
+	            SET last_try = NOW(), last_error = SQLERRM
+	            WHERE id = rec.id;
+
                 -- ❌ NÃO marca como processado na tabela real!
                 -- O job permanece com processed_at = NULL para retry
                 
@@ -203,6 +208,8 @@ BEGIN
                 --INSERT INTO syncdt._logs (table_schema, table_name, command, started_at, completed_at, success, error_message)
                 --VALUES (rec.derived_schema, rec.derived_table, 'REFRESH', start_time, NOW(), false, SQLERRM);
         END;
+
+
     END LOOP;
 
     -- Log de sucesso (mantido do código original, mas comentado)
