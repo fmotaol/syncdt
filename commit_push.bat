@@ -178,9 +178,7 @@ echo.
 echo ==========================================
 echo Commit e tag criados localmente. Push cancelado.
 echo ==========================================
-pause
 goto :eof
 
 :fim
-pause
 goto :eof
