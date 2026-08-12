@@ -9,7 +9,7 @@ git status --porcelain | findstr . >nul
 if errorlevel 1 (
     echo NENHUMA ALTERACAO NA WORKING TREE.
     echo Verificando se ha commits locais para enviar...
-    goto :push
+    goto :pergunta_push
 )
 
 echo.
@@ -140,14 +140,24 @@ if "!mensagem!"=="" (
 git commit -m "!mensagem!"
 git tag !tagv!
 
+:pergunta_push
+echo.
+set /p enviar="Enviar para o servidor (S/N)? [S]: "
+if "!enviar!"=="" set enviar=S
+if /i "!enviar!"=="S" goto :push
+if /i "!enviar!"=="N" goto :fim_sem_push
+echo Opcao invalida! Use S ou N.
+goto :pergunta_push
+
 :push
 echo.
-echo ENVIANDO PARA O GITHUB...
+echo ENVIANDO PARA O SERVIDOR...
 git push --all
 if errorlevel 1 (
     echo.
     echo ERRO: Falha no push --all!
     pause
+    goto :fim
 )
 
 git push --tags
@@ -155,9 +165,22 @@ if errorlevel 1 (
     echo.
     echo ERRO: Falha no push --tags!
     pause
+    goto :fim
 )
 
 echo ==========================================
 echo Commit/push concluido!
+pause
+goto :eof
+
+:fim_sem_push
+echo.
+echo ==========================================
+echo Commit e tag criados localmente. Push cancelado.
+echo ==========================================
+pause
+goto :eof
+
+:fim
 pause
 goto :eof
