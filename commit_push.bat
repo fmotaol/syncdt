@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal enabledelayedexpansion
 echo ==========================================
 echo Iniciando processo de commit e push...
@@ -24,8 +25,9 @@ git add %arquivos%
 
 echo.
 echo ULTIMAS 8 TAGS DO BRANCH ATUAL:
+echo ==========================================
 
-REM Mostra as últimas 8 tags
+REM Mostra as últimas 8 tags com seus comentários e data
 set count=0
 for /f "delims=" %%i in ('git tag --sort=v:refname') do (
     set /a count+=1
@@ -38,10 +40,12 @@ if !start! LSS 0 set start=0
 set idx=0
 for /f "delims=" %%i in ('git tag --sort=v:refname') do (
     if !idx! GEQ !start! (
-        echo %%i
+        call :mostrar_tag %%i
     )
     set /a idx+=1
 )
+echo.
+echo ==========================================
 echo.
 
 REM Pega a última tag (mais recente)
@@ -193,4 +197,13 @@ echo ==========================================
 goto :eof
 
 :fim
+goto :eof
+
+:mostrar_tag
+set "tag=%1"
+for /f "delims=" %%m in ('git log -1 --pretty^=format:"%%s" %tag% 2^>nul') do (
+    for /f "delims=" %%d in ('git log -1 --pretty^=format:"%%ad" --date^=short %tag% 2^>nul') do (
+        echo %tag% - %%m (%%d^)
+    )
+)
 goto :eof

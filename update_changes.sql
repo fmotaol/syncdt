@@ -101,24 +101,27 @@ BEGIN
         wait_until TIMESTAMPTZ,
         processed_at TIMESTAMPTZ,
         status TEXT DEFAULT 'Pending',  -- pending, processing, done, error
+		last_try TIMESTAMPTZ,
         error_message TEXT
     ) ON COMMIT DROP;
+
+	create index on temp_jobs_to_process(last_try, triggered_at, id) where status = 'Pending';
 
     -- 🔒 PASSO 2: Pega os jobs com lock e insere na temp table
     -- O lock só existe durante este INSERT
     INSERT INTO temp_jobs_to_process (
         id, derived_schema, derived_table, filter, 
-        triggered_at, wait_until, processed_at
+        triggered_at, wait_until, processed_at, last_try
     )
     SELECT 
         q.id, q.derived_schema, q.derived_table, q.filter,
-        q.triggered_at, q.wait_until, q.processed_at
+        q.triggered_at, q.wait_until, q.processed_at, last_try
     FROM syncdt._refresh_queue q
     WHERE processed_at is null
       AND ((q.derived_schema = _update_changes_sequential.derived_schema AND q.derived_table = _update_changes_sequential.derived_table) OR
            (_update_changes_sequential.derived_schema is null AND _update_changes_sequential.derived_table is null))
       AND (q.wait_until is null or q.wait_until <= NOW())
-    ORDER BY triggered_at, id ASC
+    ORDER BY last_try nulls first, triggered_at, id ASC
     LIMIT max_queue
     FOR UPDATE SKIP LOCKED;
 
@@ -138,7 +141,7 @@ BEGIN
     FOR rec IN 
         SELECT * FROM temp_jobs_to_process 
         WHERE status = 'Pending'
-        ORDER BY triggered_at, id ASC
+        ORDER BY last_try nulls first, triggered_at, id ASC
     LOOP
         BEGIN
             -- Atualiza status na temp table
@@ -225,97 +228,6 @@ EXCEPTION
         st := ' ' || COALESCE(derived_schema || '.' || derived_table, '');
         
         RAISE WARNING 'Erro no refresh%: %', st, SQLERRM;
-        RAISE;
-END;
-$$;
-
-
-
-
-
-CREATE OR REPLACE FUNCTION syncdt._update_changes_grouped(
-    derived_schema TEXT,
-    derived_table TEXT,
-    max_queue int default null
-)
-RETURNS VOID
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    query TEXT;
-    rec RECORD;
-    start_time TIMESTAMPTZ;
-    rows_affected BIGINT;
-    total_deleted BIGINT := 0;
-    total_inserted BIGINT := 0;
-	pid int;
-BEGIN
-	perform syncdt._clear_queue_history();
-
-    start_time := NOW();
-	pid = pg_backend_pid();
-
-	update syncdt._refresh_queue
-	set locked_by = pid, locked_until = start_time + interval '5 minutes'
-    WHERE id in 
-		(SELECT id 
-	     FROM syncdt._refresh_queue q
-		 where processed_at is null
-		   AND ((q.derived_schema = _update_changes_grouped.derived_schema AND q.derived_table = _update_changes_grouped.derived_table) OR
-			   (_update_changes_grouped.derived_schema is null AND _update_changes_grouped.derived_table is null))
-		   and (q.wait_until is null or q.wait_until <= NOW())  
-		   and (locked_by is null or locked_by = pid or locked_until < now() or locked_until is null)		      		
-	     ORDER BY triggered_at, id ASC
-	     limit max_queue);
-
-    -- FASE 1: DELETE de todos os pendentes (um por um)
-    FOR rec IN
-		select 	q.derived_schema, q.derived_table, 
-				string_agg(filter, ' OR ') as filter, 
-				array_agg(id) as ids,
-				count(*) as row_count
-		from (
-	        SELECT * 
-	        FROM syncdt._refresh_queue qq
-	        WHERE locked_by = pid
-	        ORDER BY triggered_at, id ASC
-		) q group by q.derived_schema, q.derived_table
-    LOOP
-        perform syncdt.execute('DELETE FROM %I.%I WHERE %s', 
-                       rec.derived_schema, rec.derived_table, rec.filter);
-        GET DIAGNOSTICS rows_affected = ROW_COUNT;
-        total_deleted := total_deleted + rows_affected;
-
-	    SELECT definition_query INTO query
-	    FROM syncdt._derived_tables d
-	    WHERE (d.table_schema = rec.derived_schema AND d.table_name = rec.derived_table);
-
-        perform syncdt.execute('INSERT INTO %I.%I %s AND %s',
-                       rec.derived_schema, rec.derived_table, query, rec.filter);
-        GET DIAGNOSTICS rows_affected = ROW_COUNT;
-        total_deleted := total_deleted + rows_affected;
-
-    -- Marca como processado
-	    UPDATE syncdt._refresh_queue q
-	    SET processed_at = NOW(), locked_at = null, locked_until = null
-	    WHERE id = any(rec.ids);
-
-    END LOOP;
-    
-    
-    -- Log de sucesso
-    --INSERT INTO syncdt._logs (table_schema, table_name, command, started_at, completed_at, rows_affected, success)
-    --VALUES (derived_schema, derived_table, 'REFRESH', start_time, NOW(), total_inserted, true);
-    
-    --RAISE NOTICE 'Refresh concluído para %.% (deletados: %, inseridos: %, filters: %)', $1, $2, total_deleted, total_inserted, filter_count;
-    
-EXCEPTION
-    WHEN OTHERS THEN
-        -- Log do erro
-        --INSERT INTO syncdt._logs (table_schema, table_name, command, started_at, completed_at, success, error_message)
-        --VALUES (derived_schema, derived_table, 'REFRESH', start_time, NOW(), false, SQLERRM);
-        
-        RAISE WARNING 'Erro no refresh de %.%: %', derived_schema, derived_table, SQLERRM;
         RAISE;
 END;
 $$;
