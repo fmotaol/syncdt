@@ -148,7 +148,12 @@ DECLARE
     drec RECORD;
     sfilter TEXT;
     c FLOAT;
+	linhas_afetadas int;
+	ignored boolean;
+
 BEGIN
+	ignored = false;
+
     --sfilter := syncdt._build_filter(target_columns, source_exp);
     sfilter := replace(source_exp, '$target_columns', target_columns);
     
@@ -163,6 +168,9 @@ BEGIN
 		      AND (q.wait_until IS NOT DISTINCT FROM _notify_source_changed.wait_until)
 			  AND q.filter = sfilter AND q.processed_at IS NULL);
 
+		GET DIAGNOSTICS linhas_afetadas = ROW_COUNT;
+		ignored = (linhas_afetadas = 0);
+
 	elsif notification_mode = 'full' then
 
 		raise exception 'notification_mode full temporariamente supensa';
@@ -171,13 +179,21 @@ BEGIN
 	    VALUES (_notify_source_changed.derived_schema, _notify_source_changed.derived_table, NOW(), 
 			sfilter, _notify_source_changed.wait_until, _notify_source_changed.source_schema, _notify_source_changed.source_table);
 
+		GET DIAGNOSTICS linhas_afetadas = ROW_COUNT;
+		ignored = (linhas_afetadas = 0);
+
 	else
 		raise exception 'Modo de notificação desconhecido: %', notification_mode;
 	end if;
-
-	raise notice 'Notificação de mudança de %.% para %.% => %',  
-		_notify_source_changed.source_schema, _notify_source_changed.source_table,
-		_notify_source_changed.derived_schema, _notify_source_changed.derived_table, sfilter;
+	if ignored then
+		raise notice 'Alteração em %.% => %.%: % (notif. ignorada)',
+			_notify_source_changed.source_schema, _notify_source_changed.source_table,
+			_notify_source_changed.derived_schema, _notify_source_changed.derived_table, sfilter;
+	else
+		raise notice 'Alteração em %.% => %.%: %',
+			_notify_source_changed.source_schema, _notify_source_changed.source_table,
+			_notify_source_changed.derived_schema, _notify_source_changed.derived_table, sfilter;
+	end if;
 
     IF refresh_mode = 'immediate' THEN
         PERFORM syncdt._update_changes(derived_schema, derived_table);
