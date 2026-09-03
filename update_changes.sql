@@ -84,48 +84,66 @@ DECLARE
     st text;
     job_count INTEGER;
     error_count INTEGER := 0;
+    temp_table_name TEXT;
+    create_table_sql TEXT;
+    index_sql TEXT;
+    insert_sql TEXT;
+    process_cursor TEXT;
 BEGIN
-	perform syncdt._clear_queue_history();
+    perform syncdt._clear_queue_history();
 
     start_time := NOW();
     pid = pg_backend_pid();
 
-    -- 📦 PASSO 1: Cria tabela temporária para os jobs
-    -- Mantém a mesma estrutura da _refresh_queue + campo de status
-    CREATE TEMP TABLE temp_jobs_to_process (
-        id INTEGER PRIMARY KEY,
-        derived_schema TEXT,
-        derived_table TEXT,
-        filter TEXT,
-        triggered_at TIMESTAMPTZ,
-        wait_until TIMESTAMPTZ,
-        processed_at TIMESTAMPTZ,
-        status TEXT DEFAULT 'Pending',  -- pending, processing, done, error
-		last_try TIMESTAMPTZ,
-        error_message TEXT
-    ) ON COMMIT DROP;
+    -- 📦 PASSO 1: Gera nome da tabela temporária com 6 dígitos aleatórios
+    temp_table_name := 'temp_jobs_to_process_' || LPAD(FLOOR(RANDOM() * 1000000)::TEXT, 6, '0');
 
-	create index on temp_jobs_to_process(last_try, triggered_at, id) where status = 'Pending';
+    -- 📦 PASSO 2: Cria tabela temporária com nome dinâmico
+    create_table_sql := format('
+        CREATE TEMP TABLE %I (
+            id INTEGER PRIMARY KEY,
+            derived_schema TEXT,
+            derived_table TEXT,
+            filter TEXT,
+            triggered_at TIMESTAMPTZ,
+            wait_until TIMESTAMPTZ,
+            processed_at TIMESTAMPTZ,
+            status TEXT DEFAULT ''Pending'',
+            last_try TIMESTAMPTZ,
+            error_message TEXT
+        ) ON COMMIT DROP',
+        temp_table_name
+    );
+    EXECUTE create_table_sql;
 
-    -- 🔒 PASSO 2: Pega os jobs com lock e insere na temp table
-    -- O lock só existe durante este INSERT
-    INSERT INTO temp_jobs_to_process (
-        id, derived_schema, derived_table, filter, 
-        triggered_at, wait_until, processed_at, last_try
-    )
-    SELECT 
-        q.id, q.derived_schema, q.derived_table, q.filter,
-        q.triggered_at, q.wait_until, q.processed_at, last_try
-    FROM syncdt._refresh_queue q
-    WHERE processed_at is null
-      AND ((q.derived_schema = _update_changes_sequential.derived_schema AND q.derived_table = _update_changes_sequential.derived_table) OR
-           (_update_changes_sequential.derived_schema is null AND _update_changes_sequential.derived_table is null))
-      AND (q.wait_until is null or q.wait_until <= NOW())
-    ORDER BY last_try nulls first, triggered_at, id ASC
-    LIMIT max_queue
-    FOR UPDATE SKIP LOCKED;
+    -- Cria índice na tabela temporária
+    index_sql := format('
+        CREATE INDEX ON %I (last_try, triggered_at, id) 
+        WHERE status = ''Pending''',
+        temp_table_name
+    );
+    EXECUTE index_sql;
 
-    -- 🔓 Lock liberado automaticamente aqui!
+    -- 🔒 PASSO 3: Pega os jobs com lock e insere na temp table
+    insert_sql := format('
+        INSERT INTO %I (
+            id, derived_schema, derived_table, filter, 
+            triggered_at, wait_until, processed_at, last_try
+        )
+        SELECT 
+            q.id, q.derived_schema, q.derived_table, q.filter,
+            q.triggered_at, q.wait_until, q.processed_at, last_try
+        FROM syncdt._refresh_queue q
+        WHERE processed_at is null
+          AND ((q.derived_schema = $1 AND q.derived_table = $2) OR
+               ($1 is null AND $2 is null))
+          AND (q.wait_until is null or q.wait_until <= NOW())
+        ORDER BY last_try nulls first, triggered_at, id ASC
+        LIMIT $3
+        FOR UPDATE SKIP LOCKED',
+        temp_table_name
+    );
+    EXECUTE insert_sql USING derived_schema, derived_table, max_queue;
 
     GET DIAGNOSTICS job_count = ROW_COUNT;
     
@@ -136,18 +154,24 @@ BEGIN
 
     --RAISE NOTICE '🔒 Worker %: Pegou % jobs e liberou os locks', pid, job_count;
 
-    -- 📦 PASSO 3: Processa os jobs da tabela temporária
-    -- Agora podemos processar SEM LOCKS na _refresh_queue!
-    FOR rec IN 
-        SELECT * FROM temp_jobs_to_process 
-        WHERE status = 'Pending'
-        ORDER BY last_try nulls first, triggered_at, id ASC
-    LOOP
+    -- 📦 PASSO 4: Processa os jobs da tabela temporária
+    -- Usa cursor para iterar sobre os registros
+    process_cursor := format('
+        SELECT * FROM %I 
+        WHERE status = ''Pending''
+        ORDER BY last_try nulls first, triggered_at, id ASC',
+        temp_table_name
+    );
+    
+    FOR rec IN EXECUTE process_cursor LOOP
         BEGIN
             -- Atualiza status na temp table
-            UPDATE temp_jobs_to_process 
-            SET status = 'Processing' 
-            WHERE id = rec.id;
+            EXECUTE format('
+                UPDATE %I 
+                SET status = ''Processing'' 
+                WHERE id = $1',
+                temp_table_name
+            ) USING rec.id;
 
             -- Pega a query de definição
             SELECT definition_query INTO query
@@ -170,11 +194,14 @@ BEGIN
             GET DIAGNOSTICS rows_affected = ROW_COUNT;
             
             -- ✅ SUCESSO: Marca como processado na temp table
-            UPDATE temp_jobs_to_process 
-            SET 
-                status = 'Done',
-                processed_at = NOW()
-            WHERE id = rec.id;
+            EXECUTE format('
+                UPDATE %I 
+                SET 
+                    status = ''Done'',
+                    processed_at = NOW()
+                WHERE id = $1',
+                temp_table_name
+            ) USING rec.id;
 
             -- ✅ SUCESSO: Marca como processado na tabela real
             UPDATE syncdt._refresh_queue 
@@ -189,16 +216,18 @@ BEGIN
         EXCEPTION
             WHEN OTHERS THEN
                 -- ❌ ERRO: Marca como erro na temp table
-                UPDATE temp_jobs_to_process 
-                SET 
-                    status = 'Error',
-                    error_message = SQLERRM
+                EXECUTE format('
+                    UPDATE %I 
+                    SET 
+                        status = ''Error'',
+                        error_message = $1
+                    WHERE id = $2',
+                    temp_table_name
+                ) USING SQLERRM, rec.id;
+
+                UPDATE syncdt._refresh_queue 
+                SET last_try = NOW(), last_error = SQLERRM
                 WHERE id = rec.id;
-
-
-	            UPDATE syncdt._refresh_queue 
-	            SET last_try = NOW(), last_error = SQLERRM
-	            WHERE id = rec.id;
 
                 -- ❌ NÃO marca como processado na tabela real!
                 -- O job permanece com processed_at = NULL para retry
@@ -211,8 +240,6 @@ BEGIN
                 --INSERT INTO syncdt._logs (table_schema, table_name, command, started_at, completed_at, success, error_message)
                 --VALUES (rec.derived_schema, rec.derived_table, 'REFRESH', start_time, NOW(), false, SQLERRM);
         END;
-
-
     END LOOP;
 
     -- Log de sucesso (mantido do código original, mas comentado)
@@ -231,7 +258,6 @@ EXCEPTION
         RAISE;
 END;
 $$;
-
 
 
 CREATE OR REPLACE FUNCTION syncdt.update_changes(
